@@ -209,11 +209,14 @@ class TestSeriesConvertDtypes:
             "convert_boolean",
             "convert_floating",
         ]
-        params_dict = dict(zip(param_names, params))
+        params_dict = dict(zip(param_names, params, strict=True))
 
         expected_dtype = expected_default
         for spec, dtype in expected_other.items():
-            if all(params_dict[key] is val for key, val in zip(spec[::2], spec[1::2])):
+            if all(
+                params_dict[key] is val
+                for key, val in zip(spec[::2], spec[1::2], strict=False)
+            ):
                 expected_dtype = dtype
         if (
             using_infer_string
@@ -329,3 +332,9 @@ class TestSeriesConvertDtypes:
         result = ser.convert_dtypes(dtype_backend="pyarrow")
         expected = ser.copy()
         tm.assert_series_equal(result, expected)
+
+    def test_convert_dtypes_complex(self):
+        # GH 60129
+        ser = pd.Series([1.5 + 3.0j, 1.5 - 3.0j])
+        result = ser.convert_dtypes()
+        tm.assert_series_equal(result, ser)

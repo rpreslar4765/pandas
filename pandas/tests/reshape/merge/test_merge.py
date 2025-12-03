@@ -847,22 +847,30 @@ class TestMerge:
         left = DataFrame(
             {
                 "key": [1, 2],
-                "value": pd.date_range("20151010", periods=2, tz="US/Eastern"),
+                "value": pd.date_range(
+                    "20151010", periods=2, tz="US/Eastern", unit="ns"
+                ),
             }
         )
         right = DataFrame(
             {
                 "key": [2, 3],
-                "value": pd.date_range("20151011", periods=2, tz="US/Eastern"),
+                "value": pd.date_range(
+                    "20151011", periods=2, tz="US/Eastern", unit="ns"
+                ),
             }
         )
         expected = DataFrame(
             {
                 "key": [1, 2, 3],
-                "value_x": list(pd.date_range("20151010", periods=2, tz="US/Eastern"))
+                "value_x": list(
+                    pd.date_range("20151010", periods=2, tz="US/Eastern", unit="ns")
+                )
                 + [pd.NaT],
                 "value_y": [pd.NaT]
-                + list(pd.date_range("20151011", periods=2, tz="US/Eastern")),
+                + list(
+                    pd.date_range("20151011", periods=2, tz="US/Eastern", unit="ns")
+                ),
             }
         )
         result = merge(left, right, on="key", how="outer")
@@ -1324,6 +1332,26 @@ class TestMerge:
 
         result = merge(left, right, on=["a", "b"], validate="1:1")
         tm.assert_frame_equal(result, expected_multi)
+
+    def test_merge_validate_error_message(self):
+        # GH#62742
+        left = DataFrame({"key": [1, 1, 2]})
+        right = DataFrame({"key": [1, 2, 2]})
+
+        with pytest.raises(MergeError, match="Duplicates in left:\n  key\n   1 ...\n"):
+            merge(left, right, validate="1:1")
+        with pytest.raises(MergeError, match="Duplicates in left:\n  key\n   1 ..."):
+            merge(left, right, validate="1:m")
+        with pytest.raises(MergeError, match="Duplicates in right:\n  key\n   2 ..."):
+            merge(left, right, validate="1:1")
+        with pytest.raises(MergeError, match="Duplicates in right:\n  key\n   2 ..."):
+            merge(left, right, validate="m:1")
+
+        right = DataFrame({"key": [1, 2, 3]})
+        with pytest.raises(MergeError, match="Duplicates in left:\n  key\n   1 ..."):
+            merge(left, right, validate="1:1")
+        with pytest.raises(MergeError, match="Duplicates in right:\n  key\n   1 ..."):
+            merge(right, left, validate="1:1")
 
     def test_merge_two_empty_df_no_division_error(self):
         # GH17776, PR #17846
@@ -3096,4 +3124,28 @@ def test_merge_categorical_key_recursion():
     expected = left.astype("int64").merge(
         right.astype("float64"), on="key", how="outer"
     )
+    tm.assert_frame_equal(result, expected)
+
+
+def test_merge_pyarrow_datetime_duplicates():
+    # GH#61926
+    pytest.importorskip("pyarrow")
+
+    t = pd.date_range("2025-07-06", periods=3, freq="h")
+    df1 = DataFrame({"time": t, "val1": [1, 2, 3]})
+    df1 = df1.convert_dtypes(dtype_backend="pyarrow")
+
+    df2 = DataFrame({"time": t.repeat(2), "val2": [10, 20, 30, 40, 50, 60]})
+    df2 = df2.convert_dtypes(dtype_backend="pyarrow")
+
+    result = merge(df1, df2, on="time", how="left")
+
+    expected = DataFrame(
+        {
+            "time": t.repeat(2),
+            "val1": [1, 1, 2, 2, 3, 3],
+            "val2": [10, 20, 30, 40, 50, 60],
+        }
+    )
+    expected = expected.convert_dtypes(dtype_backend="pyarrow")
     tm.assert_frame_equal(result, expected)

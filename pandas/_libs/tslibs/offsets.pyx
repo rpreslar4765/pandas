@@ -47,6 +47,7 @@ from pandas._libs.tslibs.ccalendar import (
     int_to_weekday,
     weekday_to_int,
 )
+from pandas.util._decorators import set_module
 from pandas.util._exceptions import find_stack_level
 
 from pandas._libs.tslibs.ccalendar cimport (
@@ -692,6 +693,9 @@ cdef class BaseOffset:
             Rolled timestamp if not on offset, otherwise unchanged timestamp.
         """
         dt = Timestamp(dt)
+        if self.normalize and (dt - dt.normalize())._value != 0:
+            # GH#32616
+            dt = dt.normalize()
         if not self.is_on_offset(dt):
             dt = dt - type(self)(1, normalize=self.normalize, **self.kwds)
         return dt
@@ -814,7 +818,7 @@ cdef class BaseOffset:
         state["normalize"] = self.normalize
 
         # we don't want to actually pickle the calendar object
-        # as its a np.busyday; we recreate on deserialization
+        # as its an np.busyday; we recreate on deserialization
         state.pop("calendar", None)
         if "kwds" in state:
             state["kwds"].pop("calendar", None)
@@ -824,7 +828,7 @@ cdef class BaseOffset:
     @property
     def nanos(self):
         """
-        Returns a integer of the total number of nanoseconds for fixed frequencies.
+        Returns an integer of the total number of nanoseconds for fixed frequencies.
 
         Raises
         ------
@@ -1692,6 +1696,7 @@ class OffsetMeta(type):
 
 
 # TODO: figure out a way to use a metaclass with a cdef class
+@set_module("pandas")
 class DateOffset(RelativeDeltaOffset, metaclass=OffsetMeta):
     """
     Standard kind of date increment used for a date range.
@@ -1800,7 +1805,7 @@ class DateOffset(RelativeDeltaOffset, metaclass=OffsetMeta):
     See Also
     --------
     dateutil.relativedelta.relativedelta : The relativedelta type is designed
-        to be applied to an existing datetime an can replace specific components of
+        to be applied to an existing datetime and can replace specific components of
         that datetime, or represents an interval of time.
 
     Examples
@@ -5188,6 +5193,53 @@ INVALID_FREQ_ERR_MSG = "Invalid frequency: {0}"
 _offset_map = {}
 
 
+deprec_to_valid_alias = {
+    "H": "h",
+    "BH": "bh",
+    "CBH": "cbh",
+    "T": "min",
+    "S": "s",
+    "L": "ms",
+    "U": "us",
+    "N": "ns",
+    "AS": "YS",
+    "AS-JAN": "YS-JAN",
+    "AS-FEB": "YS-FEB",
+    "AS-MAR": "YS-MAR",
+    "AS-APR": "YS-APR",
+    "AS-MAY": "YS-MAY",
+    "AS-JUN": "YS-JUN",
+    "AS-JUL": "YS-JUL",
+    "AS-AUG": "YS-AUG",
+    "AS-SEP": "YS-SEP",
+    "AS-OCT": "YS-OCT",
+    "AS-NOV": "YS-NOV",
+    "AS-DEC": "YS-DEC",
+    "A": "Y",
+    "A-JAN": "Y-JAN",
+    "A-FEB": "Y-FEB",
+    "A-MAR": "Y-MAR",
+    "A-APR": "Y-APR",
+    "A-MAY": "Y-MAY",
+    "A-JUN": "Y-JUN",
+    "A-JUL": "Y-JUL",
+    "A-AUG": "Y-AUG",
+    "A-SEP": "Y-SEP",
+    "A-OCT": "Y-OCT",
+    "A-NOV": "Y-NOV",
+    "A-DEC": "Y-DEC",
+}
+
+
+def raise_invalid_freq(freq: str, extra_message: str | None = None) -> None:
+    msg = f"Invalid frequency: {freq}."
+    if extra_message is not None:
+        msg += f" {extra_message}"
+    if freq in deprec_to_valid_alias:
+        msg += f" Did you mean {deprec_to_valid_alias[freq]}?"
+    raise ValueError(msg)
+
+
 def _warn_about_deprecated_aliases(name: str, is_period: bool) -> str:
     if name in _lite_rule_alias:
         return name
@@ -5236,7 +5288,7 @@ def _validate_to_offset_alias(alias: str, is_period: bool) -> None:
         if (alias.upper() != alias and
                 alias.lower() not in {"s", "ms", "us", "ns"} and
                 alias.upper().split("-")[0].endswith(("S", "E"))):
-            raise ValueError(INVALID_FREQ_ERR_MSG.format(alias))
+            raise ValueError(raise_invalid_freq(freq=alias))
     if (
         is_period and
         alias in c_OFFSET_TO_PERIOD_FREQSTR and
@@ -5267,8 +5319,9 @@ def _get_offset(name: str) -> BaseOffset:
             offset = klass._from_name(*split[1:])
         except (ValueError, TypeError, KeyError) as err:
             # bad prefix or suffix
-            raise ValueError(INVALID_FREQ_ERR_MSG.format(
-                f"{name}, failed to parse with error message: {repr(err)}")
+            raise_invalid_freq(
+                freq=name,
+                extra_message=f"Failed to parse with error message: {repr(err)}."
             )
         # cache
         _offset_map[name] = offset
@@ -5399,9 +5452,10 @@ cpdef to_offset(freq, bint is_period=False):
                 else:
                     result = result + offset
         except (ValueError, TypeError) as err:
-            raise ValueError(INVALID_FREQ_ERR_MSG.format(
-                f"{freq}, failed to parse with error message: {repr(err)}")
-            ) from err
+            raise_invalid_freq(
+                freq=freq,
+                extra_message=f"Failed to parse with error message: {repr(err)}"
+            )
 
         # TODO(3.0?) once deprecation of "d" is enforced, the check for it here
         #  can be removed
@@ -5417,7 +5471,7 @@ cpdef to_offset(freq, bint is_period=False):
         result = None
 
     if result is None:
-        raise ValueError(INVALID_FREQ_ERR_MSG.format(freq))
+        raise_invalid_freq(freq=freq)
 
     try:
         has_period_dtype_code = hasattr(result, "_period_dtype_code")
@@ -5660,18 +5714,27 @@ def shift_month(stamp: datetime, months: int, day_opt: object = None) -> datetim
     cdef:
         int year, month, day
         int days_in_month, dy
+        npy_datetimestruct dts
 
-    dy = (stamp.month + months) // 12
-    month = (stamp.month + months) % 12
+    if isinstance(stamp, _Timestamp):
+        creso = (<_Timestamp>stamp)._creso
+        val = (<_Timestamp>stamp)._value
+        pandas_datetime_to_datetimestruct(val, creso, &dts)
+    else:
+        # Plain datetime/date
+        pydate_to_dtstruct(stamp, &dts)
+
+    dy = (dts.month + months) // 12
+    month = (dts.month + months) % 12
 
     if month == 0:
         month = 12
         dy -= 1
-    year = stamp.year + dy
+    year = dts.year + dy
 
     if day_opt is None:
         days_in_month = get_days_in_month(year, month)
-        day = min(stamp.day, days_in_month)
+        day = min(dts.day, days_in_month)
     elif day_opt == "start":
         day = 1
     elif day_opt == "end":

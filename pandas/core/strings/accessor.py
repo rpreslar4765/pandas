@@ -12,7 +12,7 @@ import warnings
 
 import numpy as np
 
-from pandas._config import get_option
+from pandas._config import using_string_dtype
 
 from pandas._libs import lib
 from pandas._typing import (
@@ -334,7 +334,7 @@ class StringMethods(NoNewAttributesMixin):
                 )
                 result = {
                     label: ArrowExtensionArray(pa.array(res))
-                    for label, res in zip(name, result.T)
+                    for label, res in zip(name, result.T, strict=True)
                 }
             elif is_object_dtype(result):
 
@@ -684,7 +684,8 @@ class StringMethods(NoNewAttributesMixin):
         elif na_rep is not None and union_mask.any():
             # fill NaNs with na_rep in case there are actually any NaNs
             all_cols = [
-                np.where(nm, na_rep, col) for nm, col in zip(na_masks, all_cols)
+                np.where(nm, na_rep, col)
+                for nm, col in zip(na_masks, all_cols, strict=True)
             ]
             result = cat_safe(all_cols, sep)
         else:
@@ -1350,7 +1351,13 @@ class StringMethods(NoNewAttributesMixin):
         return self._wrap_result(result, fill_value=na, returns_string=False)
 
     @forbid_nonstring_types(["bytes"])
-    def match(self, pat: str, case: bool = True, flags: int = 0, na=lib.no_default):
+    def match(
+        self,
+        pat: str | re.Pattern,
+        case: bool | lib.NoDefault = lib.no_default,
+        flags: int | lib.NoDefault = lib.no_default,
+        na=lib.no_default,
+    ):
         """
         Determine if each string starts with a match of a regular expression.
 
@@ -1396,6 +1403,39 @@ class StringMethods(NoNewAttributesMixin):
         2   False
         dtype: bool
         """
+        if flags is not lib.no_default:
+            # pat.flags will have re.U regardless, so we need to add it here
+            # before checking for a match
+            flags = flags | re.U
+            if is_re(pat):
+                if pat.flags != flags:
+                    raise ValueError(
+                        "Cannot both specify 'flags' and pass a compiled regexp "
+                        "object with conflicting flags"
+                    )
+            else:
+                pat = re.compile(pat, flags=flags)
+            # set flags=0 to ensure that when we call
+            #  re.compile(pat, flags=flags) the constructor does not raise.
+            flags = 0
+        else:
+            flags = 0
+
+        if case is lib.no_default:
+            if is_re(pat):
+                case = not bool(pat.flags & re.IGNORECASE)
+            else:
+                # Case-sensitive default
+                case = True
+        elif is_re(pat):
+            implicit_case = not bool(pat.flags & re.IGNORECASE)
+            if implicit_case != case:
+                # GH#62240
+                raise ValueError(
+                    "Cannot both specify 'case' and pass a compiled regexp "
+                    "object with conflicting case-sensitivity"
+                )
+
         result = self._data.array._str_match(pat, case=case, flags=flags, na=na)
         return self._wrap_result(result, fill_value=na, returns_string=False)
 
@@ -1912,8 +1952,8 @@ class StringMethods(NoNewAttributesMixin):
         if not is_integer(width):
             msg = f"width must be of integer type, not {type(width).__name__}"
             raise TypeError(msg)
-        f = lambda x: x.zfill(width)
-        result = self._data.array._str_map(f)
+
+        result = self._data.array._str_zfill(width)
         return self._wrap_result(result)
 
     def slice(self, start=None, stop=None, step=None):
@@ -2122,7 +2162,7 @@ class StringMethods(NoNewAttributesMixin):
         """
         if dtype is not None and not is_string_dtype(dtype):
             raise ValueError(f"dtype must be string or object, got {dtype=}")
-        if dtype is None and get_option("future.infer_string"):
+        if dtype is None and using_string_dtype():
             dtype = "str"
         # TODO: Add a similar _bytes interface.
         if encoding in _cpython_optimized_decoders:
